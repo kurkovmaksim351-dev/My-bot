@@ -1,0 +1,500 @@
+import telebot
+from telebot import types
+import json
+import os
+import time
+import threading
+from datetime import datetime
+
+TOKEN = "8975384463:AAHP6X5I75v3wUUqeVRCRSUneis6qJW_yL4"
+ADMIN_ID = 6867452784
+
+bot = telebot.TeleBot(TOKEN)
+
+USER_FILE = "users.json"
+ORDER_FILE = "orders.json"
+AD_FILE = "ads.json"
+
+def load_users():
+    if os.path.exists(USER_FILE):
+        with open(USER_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_users(users):
+    with open(USER_FILE, "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2, ensure_ascii=False)
+
+def load_orders():
+    if os.path.exists(ORDER_FILE):
+        with open(ORDER_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_orders(orders):
+    with open(ORDER_FILE, "w", encoding="utf-8") as f:
+        json.dump(orders, f, indent=2, ensure_ascii=False)
+
+def load_ads():
+    if os.path.exists(AD_FILE):
+        with open(AD_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+def save_ads(ads):
+    with open(AD_FILE, "w", encoding="utf-8") as f:
+        json.dump(ads, f, indent=2, ensure_ascii=False)
+
+users = load_users()
+orders = load_orders()
+ads = load_ads()
+
+def clean_expired_ads():
+    while True:
+        time.sleep(3600)
+        ads = load_ads()
+        now = time.time()
+        to_delete = [aid for aid, data in ads.items() if data["expires_at"] < now]
+        for aid in to_delete:
+            del ads[aid]
+        save_ads(ads)
+
+threading.Thread(target=clean_expired_ads, daemon=True).start()
+
+def main_menu(message):
+    user_id = str(message.chat.id)
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.add(
+        types.KeyboardButton("📝 Получить задание"),
+        types.KeyboardButton("💰 Баланс")
+    )
+    markup.add(
+        types.KeyboardButton("📌 Заказать отзыв"),
+        types.KeyboardButton("💸 Вывести")
+    )
+    markup.add(
+        types.KeyboardButton("📢 Разместить канал"),
+        types.KeyboardButton("⚡ Удвоитель")
+    )
+    markup.add(
+        types.KeyboardButton("⭐ Купить звёзды"),
+        types.KeyboardButton("🏆 Топ")
+    )
+    markup.add(
+        types.KeyboardButton("📊 Моя статистика"),
+        types.KeyboardButton("👤 Мои данные")
+    )
+    bot.send_message(
+        message.chat.id,
+        f"👋 Привет, {message.chat.first_name}!\n\n"
+        f"💰 Рубли: {users[user_id].get('balance_rub', 0)}\n"
+        f"⭐ Звёзды: {users[user_id].get('stars', 0)}\n\n"
+        f"📌 За задание — +10 руб.\n"
+        f"📢 Размести канал за 2 звезды (на 31 день).\n"
+        f"⚡ Удвоитель: 1 звезда = 7 дней x2, 3 звезды = 31 день x2.\n"
+        f"⭐ Купи звёзды за Telegram Stars (1:1).",
+        reply_markup=markup
+    )
+
+@bot.message_handler(commands=['start'])
+def start(message):
+    user_id = str(message.chat.id)
+    if user_id not in users:
+        users[user_id] = {
+            "balance_rub": 0,
+            "stars": 0,
+            "phone": None,
+            "awaiting_link": False,
+            "awaiting_review": False,
+            "awaiting_subscribe": False,
+            "awaiting_phone": False,
+            "awaiting_channel_link": False,
+            "current_task": None,
+            "completed_tasks": 0,
+            "boost": {"active": False, "expires_at": 0, "multiplier": 1},
+            "withdraw_requests": []
+        }
+        save_users(users)
+    main_menu(message)
+
+@bot.message_handler(func=lambda m: m.text == "📌 Заказать отзыв")
+def order_review(message):
+    user_id = str(message.chat.id)
+    if users[user_id].get("stars", 0) < 5:
+        bot.send_message(message.chat.id, "❌ У тебя меньше 5 звёзд.")
+        return
+    users[user_id]["stars"] -= 5
+    save_users(users)
+    bot.send_message(message.chat.id, "✅ 5 звёзд списано. Отправь ссылку на сайт:")
+    users[user_id]["awaiting_link"] = True
+    save_users(users)
+
+@bot.message_handler(func=lambda m: m.text == "📢 Разместить канал")
+def add_channel(message):
+    user_id = str(message.chat.id)
+    if users[user_id].get("stars", 0) < 2:
+        bot.send_message(message.chat.id, "❌ Нужно 2 звезды.")
+        return
+    users[user_id]["stars"] -= 2
+    save_users(users)
+    bot.send_message(message.chat.id, "📎 Отправь ссылку на канал (https://t.me/...):")
+    users[user_id]["awaiting_channel_link"] = True
+    save_users(users)
+
+@bot.message_handler(func=lambda m: m.text == "⚡ Удвоитель")
+def boost_menu(message):
+    bot.send_message(
+        message.chat.id,
+        "⚡ **Удвоитель дохода**\n\n"
+        "1 звезда = 7 дней x2\n"
+        "3 звезды = 31 день x2\n\n"
+        "Напиши: /boost 7  или  /boost 31"
+    )
+
+@bot.message_handler(commands=['boost'])
+def buy_boost(message):
+    user_id = str(message.chat.id)
+    try:
+        days = int(message.text.split()[1])
+    except:
+        bot.send_message(message.chat.id, "❌ Используй: /boost 7  или  /boost 31")
+        return
+    if days == 7:
+        price = 1
+    elif days == 31:
+        price = 3
+    else:
+        bot.send_message(message.chat.id, "❌ Только 7 или 31 день.")
+        return
+    if users[user_id].get("stars", 0) < price:
+        bot.send_message(message.chat.id, f"❌ Нужно {price} звезд.")
+        return
+    users[user_id]["stars"] -= price
+    users[user_id]["boost"] = {
+        "active": True,
+        "expires_at": time.time() + days * 24 * 3600,
+        "multiplier": 2
+    }
+    save_users(users)
+    bot.send_message(message.chat.id, f"✅ Удвоитель активирован на {days} дней!")
+
+@bot.message_handler(func=lambda m: m.text == "📝 Получить задание")
+def get_task(message):
+    user_id = str(message.chat.id)
+    available = [o for o in orders.values() if o.get("status") == "waiting"]
+    if not available:
+        bot.send_message(message.chat.id, "😕 Нет активных заданий.")
+        return
+    order = available[0]
+    order_id = order["id"]
+    bot.send_message(
+        message.chat.id,
+        f"📌 Задание:\n🔗 {order['link']}\n\nОставь отзыв и пришли ссылку."
+    )
+    users[user_id]["awaiting_review"] = True
+    users[user_id]["current_task"] = order_id
+    save_users(users)
+
+@bot.message_handler(func=lambda m: m.text == "💰 Баланс")
+def show_balance(message):
+    user_id = str(message.chat.id)
+    data = users[user_id]
+    boost = data.get("boost", {})
+    boost_text = "✅ Активен" if boost.get("active") and boost.get("expires_at", 0) > time.time() else "❌ Не активен"
+    bot.send_message(
+        message.chat.id,
+        f"💰 Рубли: {data.get('balance_rub', 0)}\n"
+        f"⭐ Звёзды: {data.get('stars', 0)}\n"
+        f"⚡ Удвоитель: {boost_text}"
+    )
+
+@bot.message_handler(func=lambda m: m.text == "⭐ Купить звёзды")
+def buy_stars_invoice(message):
+    prices = [types.LabeledPrice(label="⭐ 10 звёзд", amount=10)]
+    bot.send_invoice(
+        chat_id=message.chat.id,
+        title="Пополнение звёзд",
+        description="Купи 10 внутренних звёзд за 10 Telegram Stars",
+        invoice_payload="stars_purchase",
+        provider_token="",
+        currency="XTR",
+        prices=prices,
+        start_parameter="buy_stars"
+    )
+
+@bot.pre_checkout_query_handler(func=lambda query: True)
+def pre_checkout(pre_checkout_query):
+    bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+
+@bot.message_handler(content_types=['successful_payment'])
+def successful_payment(message):
+    user_id = str(message.chat.id)
+    stars_amount = 10  # за 10 Telegram Stars
+    users[user_id]["stars"] += stars_amount
+    save_users(users)
+    bot.send_message(
+        message.chat.id,
+        f"✅ Оплата прошла успешно! Ты получил {stars_amount} внутренних звёзд.\n"
+        f"⭐ Твой баланс: {users[user_id]['stars']} звёзд."
+    )
+
+@bot.message_handler(func=lambda m: m.text == "💸 Вывести")
+def withdraw_menu(message):
+    user_id = str(message.chat.id)
+    balance = users[user_id].get("balance_rub", 0)
+    if balance < 100:
+        bot.send_message(message.chat.id, f"❌ У тебя меньше 100 руб. (сейчас {balance})")
+        return
+    ads = load_ads()
+    if not ads:
+        bot.send_message(message.chat.id, "📱 Введи номер телефона для вывода:")
+        users[user_id]["awaiting_phone"] = True
+        save_users(users)
+        return
+    text = "📌 Подпишись на каналы:\n\n"
+    for idx, (aid, data) in enumerate(ads.items(), 1):
+        text += f"{idx}. {data['link']}\n"
+    text += "\nПосле подписки нажми «✅ Подписался»."
+    markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+    markup.add(types.KeyboardButton("✅ Подписался"))
+    markup.add(types.KeyboardButton("🔙 Назад"))
+    bot.send_message(message.chat.id, text, reply_markup=markup)
+    users[user_id]["awaiting_subscribe"] = True
+    save_users(users)
+
+@bot.message_handler(func=lambda m: m.text == "✅ Подписался")
+def confirm_subscribe(message):
+    user_id = str(message.chat.id)
+    if users[user_id].get("awaiting_subscribe"):
+        users[user_id]["awaiting_subscribe"] = False
+        bot.send_message(message.chat.id, "📱 Введи номер телефона (11 цифр):")
+        users[user_id]["awaiting_phone"] = True
+        save_users(users)
+
+@bot.message_handler(func=lambda m: m.text == "🏆 Топ")
+def top_users(message):
+    sorted_users = sorted(users.items(), key=lambda x: x[1].get("balance_rub", 0), reverse=True)
+    text = "🏆 **Топ пользователей по заработку**\n\n"
+    for idx, (uid, data) in enumerate(sorted_users[:10], 1):
+        name = "Неизвестно"
+        try:
+            user = bot.get_chat(uid)
+            name = user.first_name or "Без имени"
+        except:
+            pass
+        text += f"{idx}. {name} — {data.get('balance_rub', 0)} руб.\n"
+    bot.send_message(message.chat.id, text)
+
+@bot.message_handler(func=lambda m: m.text == "📊 Моя статистика")
+def my_stats(message):
+    user_id = str(message.chat.id)
+    data = users[user_id]
+    sorted_users = sorted(users.items(), key=lambda x: x[1].get("balance_rub", 0), reverse=True)
+    place = 1
+    for uid, _ in sorted_users:
+        if uid == user_id:
+            break
+        place += 1
+    bot.send_message(
+        message.chat.id,
+        f"📊 **Твоя статистика**\n\n"
+        f"💰 Баланс: {data.get('balance_rub', 0)} руб.\n"
+        f"⭐ Звёзды: {data.get('stars', 0)}\n"
+        f"📋 Заданий: {data.get('completed_tasks', 0)}\n"
+        f"🏆 Место в топе: #{place}"
+    )
+
+@bot.message_handler(func=lambda m: m.text == "👤 Мои данные")
+def my_data(message):
+    user_id = str(message.chat.id)
+    data = users[user_id]
+    bot.send_message(
+        message.chat.id,
+        f"👤 Твои данные:\n"
+        f"💰 Рубли: {data.get('balance_rub', 0)}\n"
+        f"⭐ Звёзды: {data.get('stars', 0)}\n"
+        f"📱 Телефон: {data.get('phone', 'Не указан')}\n"
+        f"📋 Заявок: {len(data.get('withdraw_requests', []))}"
+    )
+
+@bot.message_handler(commands=['stats'])
+def stats(message):
+    if str(message.chat.id) != str(ADMIN_ID):
+        bot.send_message(message.chat.id, "❌ Только для админа.")
+        return
+    if not users:
+        bot.send_message(message.chat.id, "📭 Нет пользователей.")
+        return
+    text = "📊 **Статистика пользователей**\n\n"
+    for uid, data in users.items():
+        name = "Неизвестно"
+        try:
+            user = bot.get_chat(uid)
+            name = user.first_name or "Без имени"
+        except:
+            pass
+        rub = data.get("balance_rub", 0)
+        stars = data.get("stars", 0)
+        phone = data.get("phone", "❌")
+        reqs = len(data.get("withdraw_requests", []))
+        text += f"👤 {name} (`{uid}`)\n"
+        text += f"💰 {rub} руб. | ⭐ {stars} | 📱 {phone} | 📋 {reqs} заявок\n"
+        text += "————————————\n"
+        if len(text) > 3500:
+            bot.send_message(message.chat.id, text)
+            text = ""
+    if text:
+        bot.send_message(message.chat.id, text)
+
+@bot.message_handler(commands=['confirm'])
+def confirm_withdraw(message):
+    if str(message.chat.id) != str(ADMIN_ID):
+        bot.send_message(message.chat.id, "❌ Только для админа.")
+        return
+    try:
+        request_id = message.text.split()[1]
+    except:
+        bot.send_message(message.chat.id, "❌ Используй: /confirm 1700000000")
+        return
+    found = False
+    for uid, data in users.items():
+        for req in data.get("withdraw_requests", []):
+            if req["id"] == request_id and req["status"] == "pending":
+                req["status"] = "completed"
+                data["balance_rub"] = 0
+                save_users(users)
+                bot.send_message(
+                    message.chat.id,
+                    f"✅ Заявка {request_id} подтверждена. Баланс обнулён."
+                )
+                bot.send_message(
+                    uid,
+                    f"✅ Ваша заявка на вывод {req['amount']} руб. подтверждена! Деньги отправлены."
+                )
+                found = True
+                break
+        if found:
+            break
+    if not found:
+        bot.send_message(message.chat.id, "❌ Заявка не найдена.")
+
+@bot.message_handler(func=lambda m: True)
+def handle_all(message):
+    user_id = str(message.chat.id)
+    text = message.text.strip()
+
+    if user_id not in users:
+        users[user_id] = {"balance_rub": 0, "stars": 0}
+        save_users(users)
+
+    if users[user_id].get("awaiting_link"):
+        if text.startswith("http"):
+            order_id = str(int(time.time()))
+            orders[order_id] = {
+                "id": order_id,
+                "link": text,
+                "customer": user_id,
+                "status": "waiting"
+            }
+            save_orders(orders)
+            users[user_id]["awaiting_link"] = False
+            save_users(users)
+            bot.send_message(message.chat.id, f"✅ Задание сохранено!\n🔗 {text}")
+        else:
+            bot.send_message(message.chat.id, "❌ Отправь ссылку (https://...)")
+        return
+
+    if users[user_id].get("awaiting_review") and text.startswith("http"):
+        task_id = users[user_id].get("current_task")
+        if task_id and task_id in orders:
+            boost = users[user_id].get("boost", {})
+            multiplier = 1
+            if boost.get("active") and boost.get("expires_at", 0) > time.time():
+                multiplier = boost.get("multiplier", 1)
+            reward = 10 * multiplier
+            users[user_id]["balance_rub"] += reward
+            users[user_id]["completed_tasks"] = users[user_id].get("completed_tasks", 0) + 1
+            users[user_id]["awaiting_review"] = False
+            users[user_id]["current_task"] = None
+            orders[task_id]["status"] = "completed"
+            save_users(users)
+            save_orders(orders)
+            bot.send_message(
+                message.chat.id,
+                f"✅ Отзыв принят! +{reward} руб.\n💰 Баланс: {users[user_id]['balance_rub']} руб."
+            )
+        else:
+            bot.send_message(message.chat.id, "❌ У тебя нет активного задания.")
+        return
+
+    if users[user_id].get("awaiting_phone"):
+        phone = text.replace(" ", "").replace("-", "").replace("+", "")
+        if phone.isdigit() and len(phone) == 11:
+            users[user_id]["phone"] = phone
+            users[user_id]["awaiting_phone"] = False
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            request_id = str(int(time.time()))
+            balance = users[user_id]["balance_rub"]
+            withdraw_data = {
+                "id": request_id,
+                "user_id": user_id,
+                "phone": phone,
+                "amount": balance,
+                "date": now,
+                "status": "pending"
+            }
+            if "withdraw_requests" not in users[user_id]:
+                users[user_id]["withdraw_requests"] = []
+            users[user_id]["withdraw_requests"].append(withdraw_data)
+            save_users(users)
+
+            bot.send_message(
+                message.chat.id,
+                f"✅ Заявка на вывод принята!\n\n"
+                f"💰 Сумма: {balance} руб.\n"
+                f"📱 Телефон: {phone}\n"
+                f"📅 Дата: {now}\n"
+                f"🆔 Заявка: {request_id}\n\n"
+                f"⏳ Ожидай подтверждения."
+            )
+
+            bot.send_message(
+                ADMIN_ID,
+                f"🔔 НОВАЯ ЗАЯВКА НА ВЫВОД\n\n"
+                f"🆔 {request_id}\n"
+                f"👤 {user_id}\n"
+                f"📱 {phone}\n"
+                f"💰 {balance} руб.\n"
+                f"📅 {now}"
+            )
+        else:
+            bot.send_message(message.chat.id, "❌ Введи 11 цифр (например, 79001234567)")
+        return
+
+    if users[user_id].get("awaiting_channel_link"):
+        if text.startswith("https://t.me/"):
+            ads = load_ads()
+            ad_id = str(int(time.time()))
+            ads[ad_id] = {
+                "link": text,
+                "owner": user_id,
+                "created_at": time.time(),
+                "expires_at": time.time() + 31 * 24 * 3600
+            }
+            save_ads(ads)
+            users[user_id]["awaiting_channel_link"] = False
+            save_users(users)
+            bot.send_message(message.chat.id, f"✅ Канал добавлен на 31 день!\n🔗 {text}")
+        else:
+            bot.send_message(message.chat.id, "❌ Отправь ссылку https://t.me/...")
+        return
+
+    if text == "🔙 Назад":
+        main_menu(message)
+        return
+
+    bot.send_message(message.chat.id, "📌 Используй кнопки меню.")
+
+if __name__ == "__main__":
+    print("🚀 Бот запущен...")
+    bot.infinity_polling()
